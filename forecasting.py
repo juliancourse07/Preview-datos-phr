@@ -34,7 +34,7 @@ def load_data(source) -> pd.DataFrame:
     if fecha is None or valor is None or area is None:
         raise ValueError("El archivo debe tener las columnas Area, FechaFctd y TotalFactPesos.")
     df = pd.DataFrame({
-        "Area": raw[area].astype(str).str.strip(),
+        "Area": raw[area].ffill().fillna("Sin área").astype(str).str.strip(),
         "Fecha": pd.to_datetime(raw[fecha], dayfirst=True, errors="coerce"),
         "Valor": pd.to_numeric(raw[valor], errors="coerce"),
     }).dropna()
@@ -234,7 +234,7 @@ def run_forecast(
     model: str | None,
     end_month: pd.Period,
     annual_adj: float = 0.0,
-    winsor_q: float | None = 0.98,
+    winsor_q: float | None = None,
     smooth: float = 0.4,
     stretch: float = 0.05,
     budget_flat: float = 0.5,
@@ -263,6 +263,9 @@ def run_forecast(
 
     curve = intramonth_curve(daily, smooth)
     first = monthly.index[-1] + 1
+    last_date = daily_raw.index[-1]
+    partial_month = last_date.to_period("M") if last_date.to_period("M") == first and \
+        last_date < business_days(first.start_time, first.end_time.normalize())[-1] else None
     months = pd.period_range(first, end_month, freq="M")
     drows, mrows = [], []
     for p in months:
@@ -278,14 +281,30 @@ def run_forecast(
         flat = np.full(len(bd), 1 / len(bd))
         bprof = (1 - budget_flat) * prof + budget_flat * flat
         budget_total = total * (1 + stretch)
-        for d, w, bw in zip(bd, prof, bprof):
-            drows.append({
-                "Fecha": d, "Mes": str(p), "Pronóstico": total * w,
-                "Presupuesto ideal": budget_total * bw,
-            })
+        mtd, n_el = 0.0, 0
+        if p == partial_month:
+            el = bd <= last_date
+            n_el = int(el.sum())
+            mtd = float(daily_raw[(daily_raw.index >= p.start_time) & (daily_raw.index <= last_date)].sum())
+            rem = max(prof[n_el:].sum(), 1e-9)
+            remaining = total * rem
+            total_m = mtd + remaining
+            lo_m, hi_m = mtd + remaining * lo_r, mtd + remaining * hi_r
+            budget_total = max(total_m * (1 + stretch), mtd)
+            brem = max(budget_total - mtd, 0.0)
+            w_p = prof[n_el:] / rem
+            bw = bprof[n_el:] / max(bprof[n_el:].sum(), 1e-9)
+            for d, w, b in zip(bd[n_el:], w_p, bw):
+                drows.append({"Fecha": d, "Mes": str(p), "Pronóstico": remaining * w,
+                              "Presupuesto ideal": brem * b})
+            total, lo_r, hi_r = total_m, lo_m / total_m, hi_m / total_m
+        else:
+            for d, w, bw in zip(bd, prof, bprof):
+                drows.append({"Fecha": d, "Mes": str(p), "Pronóstico": total * w,
+                              "Presupuesto ideal": budget_total * bw})
         mrows.append({
-            "Mes": str(p), "Días hábiles": len(bd), "Pronóstico": total,
-            "P10": total * lo_r, "P90": total * hi_r,
+            "Mes": str(p), "Días hábiles": len(bd), "Facturado a la fecha": mtd,
+            "Pronóstico": total, "P10": total * lo_r, "P90": total * hi_r,
             "Presupuesto ideal": budget_total,
             "Índice estacional": idx[p.month],
         })
