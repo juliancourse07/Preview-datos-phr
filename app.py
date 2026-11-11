@@ -71,14 +71,14 @@ end_year = st.sidebar.selectbox("Pronosticar hasta", [last_year + 1, last_year +
                                 format_func=lambda y: f"Dic {y}")
 modelo = st.sidebar.selectbox("Modelo", ["Automático (mejor en backtest)", fc.ENSEMBLE, *fc.BASE_MODELS])
 adj = st.sidebar.slider("Ajuste anual (inflación/tarifas) %", 0.0, 15.0, 5.0, 0.5) / 100
-winsor = st.sidebar.checkbox("Suavizar facturas atípicas (p98)", True)
+winsor = st.sidebar.checkbox("Suavizar facturas atípicas (p98) — resta fuerza al cierre de diciembre", False)
 smooth = st.sidebar.slider("Suavizado curva intra-mes", 0.0, 1.0, 0.4, 0.1)
 stretch = st.sidebar.slider("Meta sobre pronóstico (presupuesto) %", 0.0, 20.0, 5.0, 1.0) / 100
 flat = st.sidebar.slider("Uniformidad del presupuesto diario", 0.0, 1.0, 0.5, 0.1)
 
 with st.sidebar.expander("Estacionalidad mensual (editable)"):
     base_idx = fc.monthly_seasonality(fc.monthly_table(fc.daily_series(dff)))
-    over = {m: st.number_input(fc.MESES[m - 1], 0.5, 1.5, round(float(base_idx[m]), 2), 0.01)
+    over = {m: st.number_input(fc.MESES[m - 1], 0.1, 3.0, round(float(base_idx[m]), 2), 0.01)
             for m in range(1, 13)}
 
 res = fc.run_forecast(
@@ -100,9 +100,10 @@ next_year = mf[mf["Mes"].str.startswith(str(last_year + 1))]
 c = st.columns(4)
 c[0].metric("Modelo", res["model"].split(" (")[0])
 if not nov.empty:
-    c[1].metric("Cierre Nov (P50)", cop(nov["Pronóstico"].iloc[0]),
+    c[1].metric("Cierre Nov (facturado + proyectado)", cop(nov["Pronóstico"].iloc[0]),
                 f"P10–P90: {cop(nov['P10'].iloc[0])} – {cop(nov['P90'].iloc[0])}", delta_color="off")
-    c[2].metric("Presupuesto Nov", cop(nov["Presupuesto ideal"].iloc[0]))
+    c[2].metric("Presupuesto Nov", cop(nov["Presupuesto ideal"].iloc[0]),
+                f"Facturado a la fecha: {cop(nov['Facturado a la fecha'].iloc[0])}", delta_color="off")
 c[3].metric(f"Total {last_year + 1}", cop(next_year["Pronóstico"].sum()) if not next_year.empty else "–")
 
 t1, t2, t3, t4, t5 = st.tabs(["Mensual", "Diario", "Estacionalidad", "Presupuesto diario", "Validación"])
@@ -119,7 +120,7 @@ with t1:
                     line=dict(color=LIMA, width=3))
     st.plotly_chart(style(fig), width="stretch")
     st.dataframe(mf.drop(columns="Mes_dt").style.format(
-        {c: "{:,.0f}" for c in ["Pronóstico", "P10", "P90", "Presupuesto ideal"]} | {"Índice estacional": "{:.2f}"}),
+        {c: "{:,.0f}" for c in ["Facturado a la fecha", "Pronóstico", "P10", "P90", "Presupuesto ideal"]} | {"Índice estacional": "{:.2f}"}),
         width="stretch", hide_index=True)
 
 with t2:
