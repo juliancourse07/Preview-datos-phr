@@ -79,7 +79,7 @@ filtros = "; ".join(f"{k}: {', '.join(map(str, v[:3]))}{'…' if len(v) > 3 else
 if desde:
     filtros = f"{desde:%d/%m/%Y} a {hasta:%d/%m/%Y}" + (f" | {filtros}" if filtros else "")
 st.sidebar.download_button(
-    "⬇️ Descargar informe (Excel)", rp.to_excel(data, filtros), "reporte_facturacion_horas.xlsx",
+    "⬇️ Descargar informe (Excel)", rp.to_excel(data, filtros, desde, hasta), "reporte_facturacion_horas.xlsx",
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary",
 )
 

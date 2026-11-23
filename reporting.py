@@ -19,6 +19,14 @@ import pandas as pd
 
 VERDE, VERDE_CL, LIMA, GRIS, CREMA = "#007A3D", "#8DC63F", "#C4D82E", "#6D6E71", "#F2F8EC"
 LOGO = Path(__file__).with_name("logo-phr-horizontal-1024x93.png")
+LOGO_BLANCO = Path(__file__).with_name("logo-phr-blanco.png")
+MESES_L = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre",
+           "noviembre", "diciembre"]
+
+
+def fecha_larga(d, corta=False) -> str:
+    d = pd.Timestamp(d)
+    return f"{d.day} de {MESES_L[d.month - 1]}" + ("" if corta else f" de {d.year}")
 
 # Significado resumido de los estados de proforma (se completa con «Nombre Estado Prof.» de Horas).
 ESTADOS_BASE = {"F": "Facturado", "O": "Abierta / en elaboración"}
@@ -353,7 +361,7 @@ def _pct(a, b):
 
 
 # --------------------------------------------------------------------- Excel
-def to_excel(data: dict, filtros_txt: str = "") -> bytes:
+def to_excel(data: dict, filtros_txt: str = "", desde=None, hasta=None) -> bytes:
     a = analyze(data)
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="xlsxwriter", engine_kwargs={"options": {"nan_inf_to_errors": True}}) as xw:
@@ -378,36 +386,54 @@ def to_excel(data: dict, filtros_txt: str = "") -> bytes:
                                  "align": "center", "num_format": v, "bottom": 2, "bottom_color": VERDE_CL,
                                  "left": 1, "right": 1, "border_color": "#DDDDDD"}) for k, v in numfmt.items()}
 
-        def header(ws, title, sub, ncols):
+        bf = {"font_name": "Calibri", "bg_color": GRIS, "font_color": "#FFFFFF"}
+        B = {"t": wb.add_format({**bf, "bold": True, "font_size": 16}),
+             "b": wb.add_format({**bf, "bold": True, "font_size": 11}),
+             "n": wb.add_format({**bf, "font_size": 11}),
+             "bg": wb.add_format(bf), "line": wb.add_format({"bg_color": VERDE_CL})}
+
+        def header(ws, title, sub, ncols, caso=None):
             ws.hide_gridlines(2)
-            ws.set_row(0, 42)
-            if LOGO.exists():
-                ws.insert_image(0, 0, str(LOGO), {"x_scale": 0.33, "y_scale": 0.33, "x_offset": 6, "y_offset": 8,
-                                                  "object_position": 3})
-            ws.write(1, 0, title, F["title"])
-            ws.write(2, 0, sub, F["sub"])
+            for r, h in enumerate([50, 26, 20, 20, 20, 10]):
+                ws.set_row(r, h, B["line"] if r == 5 else B["bg"])
+            ws.insert_image(0, 0, str(LOGO_BLANCO), {"x_scale": 0.3, "y_scale": 0.3, "x_offset": 12, "y_offset": 10,
+                                                     "object_position": 3})
+            ws.write(1, 0, "  " + title, B["t"])
+            if caso:
+                ws.write_rich_string(2, 0, B["b"], "  CASO: ", B["n"], caso, B["n"])
+                ws.write(3, 0, "  " + periodo, B["n"])
+            else:
+                ws.write(2, 0, "  " + periodo, B["n"])
+            ws.write_rich_string(4, 0, B["b"], "  ACTUALIZACIÓN: ", B["n"], fecha_larga(corte), B["n"])
             ws.set_landscape()
             ws.fit_to_pages(1, 0)
             ws.set_paper(9)
 
-        gen = f"Generado {datetime.now():%d/%m/%Y %H:%M}" + (f"  |  Filtros: {filtros_txt}" if filtros_txt else "")
-        sheets = [("facturacion", "Facturación", "Facturación (Estado F · hora facturable S o vacío)", "Total COP"),
-                  ("proformas", "Proformas", "Proformas por facturar (Estado distinto de F · hora facturable S o vacío)", "Total COP"),
-                  ("pendientes", "Horas Pendientes", "Horas pendientes (sin estado de proforma)", "Valor Estimado COP")]
+        corte = pd.Timestamp(hasta) if hasta is not None else pd.Timestamp(datetime.now().date())
+        pend = data["pendientes"]
+        fmin = pd.Timestamp(desde) if desde is not None else pend["Fecha Movimiento TR"].min()
+        periodo = (f"Horas del {fecha_larga(fmin, True)} al {fecha_larga(corte)}" if pd.notna(fmin)
+                   else f"Horas hasta el {fecha_larga(corte)}")
+        casos = pend[["Cód. Caso", "Caso"]].drop_duplicates()
+        caso_txt = (casos["Caso"].iloc[0] if len(casos) == 1 else f"Todos los casos ({len(casos)})" if len(casos) else "—")
+        gen = filtros_txt
+        sheets = [("facturacion", "Facturación", "DETALLE DE FACTURACIÓN", "Total COP"),
+                  ("proformas", "Proformas", "DETALLE DE PROFORMAS POR FACTURAR", "Total COP"),
+                  ("pendientes", "Horas Pendientes", "DETALLE DE TIEMPOS PENDIENTES POR FACTURAR", "Valor Estimado COP")]
         for key, sname, title, money in sheets:
             df = data[key].drop(columns=["Mes"])
             ws = wb.add_worksheet(sname)
             xw.sheets[sname] = ws
             ws.set_tab_color(VERDE)
-            header(ws, title, gen, len(df.columns))
+            header(ws, title, gen, len(df.columns), caso_txt)
             # tarjetas resumen
             hrs = df["Horas"].sum()
             cards = [("Registros", len(df), "int"), ("Horas", hrs, "hrs"), ("Valor COP", df[money].sum(), "cop")]
             for i, (lab, val, f) in enumerate(cards):
-                ws.write(4, i * 2, lab, F["kl"])
-                ws.write(5, i * 2, val, kpi[f])
-            ws.set_row(5, 26)
-            top = 7
+                ws.write(7, i * 2, lab, F["kl"])
+                ws.write(8, i * 2, val, kpi[f])
+            ws.set_row(8, 26)
+            top = 10
             cols, n = [], len(df)
             for c in df.columns:
                 f = FMT.get(c, "txt")
@@ -435,22 +461,22 @@ def to_excel(data: dict, filtros_txt: str = "") -> bytes:
             ws.set_default_row(18)
             ws.repeat_rows(top)
 
-        _write_analysis(wb, xw, a, F, cell, kpi, header, gen)
+        _write_analysis(wb, xw, a, F, cell, kpi, header, gen, caso_txt)
     return buf.getvalue()
 
 
-def _write_analysis(wb, xw, a, F, cell, kpi, header, gen):
+def _write_analysis(wb, xw, a, F, cell, kpi, header, gen, caso_txt):
     ws = wb.add_worksheet("Análisis")
     xw.sheets["Análisis"] = ws
     ws.set_tab_color(LIMA)
-    header(ws, "Análisis ejecutivo", gen, 8)
+    header(ws, "ANÁLISIS EJECUTIVO", gen, 8, caso_txt)
     ws.set_column(0, 0, 3)
     ws.set_column(1, 1, 42)
     ws.set_column(2, 7, 17)
     ws.set_column(8, 8, 3)
     ws.set_column(9, 18, 10)
 
-    r = 4
+    r = 7
     # tarjetas KPI: 4 por fila
     layout = [(1, 1), (2, 3), (4, 5), (6, 7)]
     for i, (lab, val, f) in enumerate(a["kpis"]):
