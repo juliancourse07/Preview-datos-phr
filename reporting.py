@@ -317,6 +317,18 @@ def analyze(d: dict) -> dict:
     pen_caso = grp(pen, "Caso", {"Horas": ("Horas", "sum"), "Valor estimado": ("Valor Estimado COP", "sum"),
                                  "Antigüedad máx. (días)": ("Antigüedad (días)", "max")}, 10)
 
+    emp = pd.concat([
+        pen.assign(Origen="Pendiente")[["Empleado", "Caso", "Horas", "Valor Estimado COP"]],
+        fac[["Empleado", "Caso", "Horas", "Total COP"]].rename(columns={"Total COP": "Valor Estimado COP"}).assign(Origen="Facturado"),
+    ])
+    emp = emp[emp["Empleado"] != ""]
+    emp_caso = (emp.pivot_table(index=["Caso", "Empleado"], columns="Origen", values=["Horas", "Valor Estimado COP"],
+                                aggfunc="sum", fill_value=0))
+    emp_caso.columns = [{"Horas": "Horas ", "Valor Estimado COP": "Valor COP "}[a] + {"Pendiente": "pendientes", "Facturado": "facturadas"}[b]
+                        for a, b in emp_caso.columns]
+    emp_caso = emp_caso.reset_index().sort_values(["Caso", "Horas pendientes" if "Horas pendientes" in emp_caso else "Empleado"],
+                                                  ascending=[True, False])
+
     tablas = [
         ("Facturación por mes", mes, "col", "Mes", "Total COP"),
         ("Facturación por área", fact_group("Área"), "col", "Área", "Total COP"),
@@ -328,6 +340,7 @@ def analyze(d: dict) -> dict:
         ("Horas pendientes por área", pen_area, "col", "Área", "Horas"),
         ("Top 10 socios con horas pendientes (para gestión de las asistentes)", pen_soc, "bar", "Socio", "Horas"),
         ("Top 10 casos con más horas pendientes", pen_caso, "bar", "Caso", "Horas"),
+        ("Empleados asociados por caso (horas y valor)", emp_caso, None, None, None),
     ]
 
     ins = []
@@ -414,8 +427,8 @@ def to_excel(data: dict, filtros_txt: str = "", desde=None, hasta=None) -> bytes
         fmin = pd.Timestamp(desde) if desde is not None else pend["Fecha Movimiento TR"].min()
         periodo = (f"Horas del {fecha_larga(fmin, True)} al {fecha_larga(corte)}" if pd.notna(fmin)
                    else f"Horas hasta el {fecha_larga(corte)}")
-        casos = pend[["Cód. Caso", "Caso"]].drop_duplicates()
-        caso_txt = (casos["Caso"].iloc[0] if len(casos) == 1 else f"Todos los casos ({len(casos)})" if len(casos) else "—")
+        casos = sorted({c for df in data.values() for c in df["Caso"].dropna().astype(str) if c.strip()})
+        caso_txt = " | ".join(casos) if casos else "—"
         gen = filtros_txt
         sheets = [("facturacion", "Facturación", "DETALLE DE FACTURACIÓN", "Total COP"),
                   ("proformas", "Proformas", "DETALLE DE PROFORMAS POR FACTURAR", "Total COP"),
