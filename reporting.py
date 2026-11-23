@@ -434,35 +434,81 @@ def to_excel(data: dict, filtros_txt: str = "", desde=None, hasta=None) -> bytes
                 ws.write(8, i * 2, val, kpi[f])
             ws.set_row(8, 26)
             top = 10
-            cols, n = [], len(df)
-            for c in df.columns:
-                f = FMT.get(c, "txt")
-                col = {"header": c, "format": cell[f]}
-                if c in ("Horas", money):
-                    col["total_function"] = "sum"
-                    col["total_string"] = None
-                cols.append(col)
-            cols[0]["total_string"] = "Total"
-            data_rows = []
-            for row in df.itertuples(index=False):
-                data_rows.append([None if (v is None or (not isinstance(v, str) and pd.isna(v))) else
-                                  (v.to_pydatetime() if isinstance(v, pd.Timestamp) else v) for v in row])
-            ws.add_table(top, 0, top + max(n, 1) + 1 - (0 if n else 1), len(cols) - 1, {
-                "data": data_rows, "columns": cols, "total_row": True, "style": "Table Style Light 1",
-                "autofilter": True,
-            })
-            for i, c in enumerate(df.columns):
-                w = WIDTH.get(c) or max(12, min(26, len(c) + 4))
-                ws.set_column(i, i, w)
-            ws.set_row(top, 32, F["hdr"])
-            for i, c in enumerate(df.columns):  # el formato de encabezado debe aplicarse celda a celda
-                ws.write(top, i, c, F["hdr"])
-            ws.freeze_panes(top + 1, 2)
+            _write_grouped(ws, df, top, DATE_COL[key], money, F, cell, WB_FMT(wb, base))
+            ws.set_row(top, 32)
             ws.set_default_row(18)
             ws.repeat_rows(top)
 
         _write_analysis(wb, xw, a, F, cell, kpi, header, gen, caso_txt)
     return buf.getvalue()
+
+
+def WB_FMT(wb, base):
+    def mk(bg, fc="#000000", fmt=None, bold=True):
+        d = {**base, "bold": bold, "bg_color": bg, "font_color": fc, "top": 1, "bottom": 1, "border_color": "#BBBBBB"}
+        if fmt:
+            d["num_format"] = fmt
+        return wb.add_format(d)
+    return {
+        "mes": {"l": mk("#E3F1D3", fmt=None), "hrs": mk("#E3F1D3", fmt="#,##0.00"), "cop": mk("#E3F1D3", fmt="$ #,##0")},
+        "anio": {"l": mk("#C4D82E"), "hrs": mk("#C4D82E", fmt="#,##0.00"), "cop": mk("#C4D82E", fmt="$ #,##0")},
+        "tot": {"l": mk(GRIS, "#FFFFFF"), "hrs": mk(GRIS, "#FFFFFF", "#,##0.00"), "cop": mk(GRIS, "#FFFFFF", "$ #,##0")},
+    }
+
+
+def _write_grouped(ws, df, top, date_col, money, F, cell, S):
+    """Tabla cronológica con filas de subtotal por mes, por año (si hay más de uno) y total general."""
+    from xlsxwriter.utility import xl_col_to_name, xl_rowcol_to_cell
+
+    d = df.sort_values(date_col, kind="stable", na_position="last").reset_index(drop=True)
+    dt = d[date_col]
+    d.insert(0, "Mes Reportado", dt.dt.month.map(lambda m: MESES_L[int(m) - 1].capitalize() if pd.notna(m) else ""))
+    d.insert(0, "Año Reportado", dt.dt.year.astype("Int64"))
+    cols = list(d.columns)
+    sums = {c: cols.index(c) for c in ("Horas", money) if c in cols}
+    for j, c in enumerate(cols):
+        ws.write(top, j, c, F["hdr"])
+        ws.set_column(j, j, WIDTH.get(c) or (11 if j < 2 else max(12, min(26, len(c) + 4))))
+    cellfmt = {c: cell[FMT.get(c, "txt")] for c in cols}
+    cellfmt["Año Reportado"] = cell["int"]
+    cellfmt["Mes Reportado"] = cell["date"]
+    multi_year = d["Año Reportado"].dropna().nunique() > 1
+    r = top + 1
+
+    def subtotal(kind, label, first, last, frame):
+        ws.write(r, 2 if len(cols) > 2 else 0, label, S[kind]["l"])
+        for j in range(len(cols)):
+            if j in sums.values():
+                c = [k for k, v in sums.items() if v == j][0]
+                ref = f"{xl_rowcol_to_cell(first, j)}:{xl_rowcol_to_cell(last, j)}"
+                ws.write_formula(r, j, f"=SUBTOTAL(109,{ref})", S[kind]["hrs" if c == "Horas" else "cop"],
+                                 float(frame[c].sum()))
+            elif j != 2:
+                ws.write_blank(r, j, None, S[kind]["l"])
+
+    first_row = r
+    for y, gy in d.groupby("Año Reportado", dropna=False, sort=True):
+        y_first = r
+        for m, gm in gy.groupby(gy[date_col].dt.month, dropna=False, sort=True):
+            m_first = r
+            for row in gm.itertuples(index=False):
+                for j, v in enumerate(row):
+                    if v is None or (not isinstance(v, str) and pd.isna(v)):
+                        ws.write_blank(r, j, None, cellfmt[cols[j]])
+                    elif isinstance(v, pd.Timestamp):
+                        ws.write_datetime(r, j, v.to_pydatetime(), cellfmt[cols[j]])
+                    else:
+                        ws.write(r, j, v, cellfmt[cols[j]])
+                r += 1
+            lab = f"TOTAL {MESES_L[int(m) - 1].upper()}" if pd.notna(m) else "TOTAL SIN FECHA"
+            subtotal("mes", lab, m_first, r - 1, gm)
+            r += 1
+        if multi_year:
+            subtotal("anio", f"TOTAL {int(y)}" if pd.notna(y) else "TOTAL SIN FECHA", y_first, r - 1, gy)
+            r += 1
+    subtotal("tot", "TOTAL", first_row, r - 1, d)
+    ws.autofilter(top, 0, max(r - 1, top), len(cols) - 1)
+    ws.freeze_panes(top + 1, 2)
 
 
 def _write_analysis(wb, xw, a, F, cell, kpi, header, gen, caso_txt):
