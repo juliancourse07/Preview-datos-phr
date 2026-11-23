@@ -19,6 +19,14 @@ import pandas as pd
 
 VERDE, VERDE_CL, LIMA, GRIS, CREMA = "#007A3D", "#8DC63F", "#C4D82E", "#6D6E71", "#F2F8EC"
 LOGO = Path(__file__).with_name("logo-phr-horizontal-1024x93.png")
+LOGO_BLANCO = Path(__file__).with_name("logo-phr-blanco.png")
+MESES_L = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre",
+           "noviembre", "diciembre"]
+
+
+def fecha_larga(d, corta=False) -> str:
+    d = pd.Timestamp(d)
+    return f"{d.day} de {MESES_L[d.month - 1]}" + ("" if corta else f" de {d.year}")
 
 # Significado resumido de los estados de proforma (se completa con «Nombre Estado Prof.» de Horas).
 ESTADOS_BASE = {"F": "Facturado", "O": "Abierta / en elaboración"}
@@ -353,7 +361,7 @@ def _pct(a, b):
 
 
 # --------------------------------------------------------------------- Excel
-def to_excel(data: dict, filtros_txt: str = "") -> bytes:
+def to_excel(data: dict, filtros_txt: str = "", desde=None, hasta=None) -> bytes:
     a = analyze(data)
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="xlsxwriter", engine_kwargs={"options": {"nan_inf_to_errors": True}}) as xw:
@@ -378,79 +386,143 @@ def to_excel(data: dict, filtros_txt: str = "") -> bytes:
                                  "align": "center", "num_format": v, "bottom": 2, "bottom_color": VERDE_CL,
                                  "left": 1, "right": 1, "border_color": "#DDDDDD"}) for k, v in numfmt.items()}
 
-        def header(ws, title, sub, ncols):
+        bf = {"font_name": "Calibri", "bg_color": GRIS, "font_color": "#FFFFFF"}
+        B = {"t": wb.add_format({**bf, "bold": True, "font_size": 16}),
+             "b": wb.add_format({**bf, "bold": True, "font_size": 11}),
+             "n": wb.add_format({**bf, "font_size": 11}),
+             "bg": wb.add_format(bf), "line": wb.add_format({"bg_color": VERDE_CL})}
+
+        def header(ws, title, sub, ncols, caso=None):
             ws.hide_gridlines(2)
-            ws.set_row(0, 42)
-            if LOGO.exists():
-                ws.insert_image(0, 0, str(LOGO), {"x_scale": 0.33, "y_scale": 0.33, "x_offset": 6, "y_offset": 8,
-                                                  "object_position": 3})
-            ws.write(1, 0, title, F["title"])
-            ws.write(2, 0, sub, F["sub"])
+            for r, h in enumerate([50, 26, 20, 20, 20, 10]):
+                ws.set_row(r, h, B["line"] if r == 5 else B["bg"])
+            ws.insert_image(0, 0, str(LOGO_BLANCO), {"x_scale": 0.3, "y_scale": 0.3, "x_offset": 12, "y_offset": 10,
+                                                     "object_position": 3})
+            ws.write(1, 0, "  " + title, B["t"])
+            if caso:
+                ws.write_rich_string(2, 0, B["b"], "  CASO: ", B["n"], caso, B["n"])
+                ws.write(3, 0, "  " + periodo, B["n"])
+            else:
+                ws.write(2, 0, "  " + periodo, B["n"])
+            ws.write_rich_string(4, 0, B["b"], "  ACTUALIZACIÓN: ", B["n"], fecha_larga(corte), B["n"])
             ws.set_landscape()
             ws.fit_to_pages(1, 0)
             ws.set_paper(9)
 
-        gen = f"Generado {datetime.now():%d/%m/%Y %H:%M}" + (f"  |  Filtros: {filtros_txt}" if filtros_txt else "")
-        sheets = [("facturacion", "Facturación", "Facturación (Estado F · hora facturable S o vacío)", "Total COP"),
-                  ("proformas", "Proformas", "Proformas por facturar (Estado distinto de F · hora facturable S o vacío)", "Total COP"),
-                  ("pendientes", "Horas Pendientes", "Horas pendientes (sin estado de proforma)", "Valor Estimado COP")]
+        corte = pd.Timestamp(hasta) if hasta is not None else pd.Timestamp(datetime.now().date())
+        pend = data["pendientes"]
+        fmin = pd.Timestamp(desde) if desde is not None else pend["Fecha Movimiento TR"].min()
+        periodo = (f"Horas del {fecha_larga(fmin, True)} al {fecha_larga(corte)}" if pd.notna(fmin)
+                   else f"Horas hasta el {fecha_larga(corte)}")
+        casos = pend[["Cód. Caso", "Caso"]].drop_duplicates()
+        caso_txt = (casos["Caso"].iloc[0] if len(casos) == 1 else f"Todos los casos ({len(casos)})" if len(casos) else "—")
+        gen = filtros_txt
+        sheets = [("facturacion", "Facturación", "DETALLE DE FACTURACIÓN", "Total COP"),
+                  ("proformas", "Proformas", "DETALLE DE PROFORMAS POR FACTURAR", "Total COP"),
+                  ("pendientes", "Horas Pendientes", "DETALLE DE TIEMPOS PENDIENTES POR FACTURAR", "Valor Estimado COP")]
         for key, sname, title, money in sheets:
             df = data[key].drop(columns=["Mes"])
             ws = wb.add_worksheet(sname)
             xw.sheets[sname] = ws
             ws.set_tab_color(VERDE)
-            header(ws, title, gen, len(df.columns))
+            header(ws, title, gen, len(df.columns), caso_txt)
             # tarjetas resumen
             hrs = df["Horas"].sum()
             cards = [("Registros", len(df), "int"), ("Horas", hrs, "hrs"), ("Valor COP", df[money].sum(), "cop")]
             for i, (lab, val, f) in enumerate(cards):
-                ws.write(4, i * 2, lab, F["kl"])
-                ws.write(5, i * 2, val, kpi[f])
-            ws.set_row(5, 26)
-            top = 7
-            cols, n = [], len(df)
-            for c in df.columns:
-                f = FMT.get(c, "txt")
-                col = {"header": c, "format": cell[f]}
-                if c in ("Horas", money):
-                    col["total_function"] = "sum"
-                    col["total_string"] = None
-                cols.append(col)
-            cols[0]["total_string"] = "Total"
-            data_rows = []
-            for row in df.itertuples(index=False):
-                data_rows.append([None if (v is None or (not isinstance(v, str) and pd.isna(v))) else
-                                  (v.to_pydatetime() if isinstance(v, pd.Timestamp) else v) for v in row])
-            ws.add_table(top, 0, top + max(n, 1) + 1 - (0 if n else 1), len(cols) - 1, {
-                "data": data_rows, "columns": cols, "total_row": True, "style": "Table Style Light 1",
-                "autofilter": True,
-            })
-            for i, c in enumerate(df.columns):
-                w = WIDTH.get(c) or max(12, min(26, len(c) + 4))
-                ws.set_column(i, i, w)
-            ws.set_row(top, 32, F["hdr"])
-            for i, c in enumerate(df.columns):  # el formato de encabezado debe aplicarse celda a celda
-                ws.write(top, i, c, F["hdr"])
-            ws.freeze_panes(top + 1, 2)
+                ws.write(7, i * 2, lab, F["kl"])
+                ws.write(8, i * 2, val, kpi[f])
+            ws.set_row(8, 26)
+            top = 10
+            _write_grouped(ws, df, top, DATE_COL[key], money, F, cell, WB_FMT(wb, base))
+            ws.set_row(top, 32)
             ws.set_default_row(18)
             ws.repeat_rows(top)
 
-        _write_analysis(wb, xw, a, F, cell, kpi, header, gen)
+        _write_analysis(wb, xw, a, F, cell, kpi, header, gen, caso_txt)
     return buf.getvalue()
 
 
-def _write_analysis(wb, xw, a, F, cell, kpi, header, gen):
+def WB_FMT(wb, base):
+    def mk(bg, fc="#000000", fmt=None, bold=True):
+        d = {**base, "bold": bold, "bg_color": bg, "font_color": fc, "top": 1, "bottom": 1, "border_color": "#BBBBBB"}
+        if fmt:
+            d["num_format"] = fmt
+        return wb.add_format(d)
+    return {
+        "mes": {"l": mk("#E3F1D3", fmt=None), "hrs": mk("#E3F1D3", fmt="#,##0.00"), "cop": mk("#E3F1D3", fmt="$ #,##0")},
+        "anio": {"l": mk("#C4D82E"), "hrs": mk("#C4D82E", fmt="#,##0.00"), "cop": mk("#C4D82E", fmt="$ #,##0")},
+        "tot": {"l": mk(GRIS, "#FFFFFF"), "hrs": mk(GRIS, "#FFFFFF", "#,##0.00"), "cop": mk(GRIS, "#FFFFFF", "$ #,##0")},
+    }
+
+
+def _write_grouped(ws, df, top, date_col, money, F, cell, S):
+    """Tabla cronológica con filas de subtotal por mes, por año (si hay más de uno) y total general."""
+    from xlsxwriter.utility import xl_col_to_name, xl_rowcol_to_cell
+
+    d = df.sort_values(date_col, kind="stable", na_position="last").reset_index(drop=True)
+    dt = d[date_col]
+    d.insert(0, "Mes Reportado", dt.dt.month.map(lambda m: MESES_L[int(m) - 1].capitalize() if pd.notna(m) else ""))
+    d.insert(0, "Año Reportado", dt.dt.year.astype("Int64"))
+    cols = list(d.columns)
+    sums = {c: cols.index(c) for c in ("Horas", money) if c in cols}
+    for j, c in enumerate(cols):
+        ws.write(top, j, c, F["hdr"])
+        ws.set_column(j, j, WIDTH.get(c) or (11 if j < 2 else max(12, min(26, len(c) + 4))))
+    cellfmt = {c: cell[FMT.get(c, "txt")] for c in cols}
+    cellfmt["Año Reportado"] = cell["int"]
+    cellfmt["Mes Reportado"] = cell["date"]
+    multi_year = d["Año Reportado"].dropna().nunique() > 1
+    r = top + 1
+
+    def subtotal(kind, label, first, last, frame):
+        ws.write(r, 2 if len(cols) > 2 else 0, label, S[kind]["l"])
+        for j in range(len(cols)):
+            if j in sums.values():
+                c = [k for k, v in sums.items() if v == j][0]
+                ref = f"{xl_rowcol_to_cell(first, j)}:{xl_rowcol_to_cell(last, j)}"
+                ws.write_formula(r, j, f"=SUBTOTAL(109,{ref})", S[kind]["hrs" if c == "Horas" else "cop"],
+                                 float(frame[c].sum()))
+            elif j != 2:
+                ws.write_blank(r, j, None, S[kind]["l"])
+
+    first_row = r
+    for y, gy in d.groupby("Año Reportado", dropna=False, sort=True):
+        y_first = r
+        for m, gm in gy.groupby(gy[date_col].dt.month, dropna=False, sort=True):
+            m_first = r
+            for row in gm.itertuples(index=False):
+                for j, v in enumerate(row):
+                    if v is None or (not isinstance(v, str) and pd.isna(v)):
+                        ws.write_blank(r, j, None, cellfmt[cols[j]])
+                    elif isinstance(v, pd.Timestamp):
+                        ws.write_datetime(r, j, v.to_pydatetime(), cellfmt[cols[j]])
+                    else:
+                        ws.write(r, j, v, cellfmt[cols[j]])
+                r += 1
+            lab = f"TOTAL {MESES_L[int(m) - 1].upper()}" if pd.notna(m) else "TOTAL SIN FECHA"
+            subtotal("mes", lab, m_first, r - 1, gm)
+            r += 1
+        if multi_year:
+            subtotal("anio", f"TOTAL {int(y)}" if pd.notna(y) else "TOTAL SIN FECHA", y_first, r - 1, gy)
+            r += 1
+    subtotal("tot", "TOTAL", first_row, r - 1, d)
+    ws.autofilter(top, 0, max(r - 1, top), len(cols) - 1)
+    ws.freeze_panes(top + 1, 2)
+
+
+def _write_analysis(wb, xw, a, F, cell, kpi, header, gen, caso_txt):
     ws = wb.add_worksheet("Análisis")
     xw.sheets["Análisis"] = ws
     ws.set_tab_color(LIMA)
-    header(ws, "Análisis ejecutivo", gen, 8)
+    header(ws, "ANÁLISIS EJECUTIVO", gen, 8, caso_txt)
     ws.set_column(0, 0, 3)
     ws.set_column(1, 1, 42)
     ws.set_column(2, 7, 17)
     ws.set_column(8, 8, 3)
     ws.set_column(9, 18, 10)
 
-    r = 4
+    r = 7
     # tarjetas KPI: 4 por fila
     layout = [(1, 1), (2, 3), (4, 5), (6, 7)]
     for i, (lab, val, f) in enumerate(a["kpis"]):
