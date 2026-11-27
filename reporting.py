@@ -156,6 +156,19 @@ def kind_of(raw: pd.DataFrame) -> str | None:
     return None
 
 
+def read_sheets(src) -> dict:
+    return pd.read_excel(src, sheet_name=None)
+
+
+def remap(raw: pd.DataFrame, spec, mapping: dict) -> pd.DataFrame:
+    """Aplica una asignación manual {campo estándar: columna del archivo}; vacío = no existe."""
+    out = {}
+    for name, cands, kind in spec:
+        col = mapping.get(name)
+        out[cands[0]] = raw[col] if col else pd.Series(np.nan, index=raw.index)
+    return pd.DataFrame(out)
+
+
 def read_excel(src) -> pd.DataFrame:
     """Lee la primera hoja que se reconozca como Facturación u Horas."""
     sheets = pd.read_excel(src, sheet_name=None)
@@ -175,8 +188,13 @@ def build_report(fact_raw: pd.DataFrame, horas_raw: pd.DataFrame) -> dict:
     if kind_of(horas_raw) != "horas":
         raise ValueError("No se reconoce el archivo de Horas (falta «Fecha Movimiento TR»).")
 
-    f = standardize(fact_raw, FACT_SPEC)
-    h = standardize(horas_raw, HORAS_SPEC)
+    return build_from_std(standardize(fact_raw, FACT_SPEC), standardize(horas_raw, HORAS_SPEC))
+
+
+def build_from_std(f: pd.DataFrame, h: pd.DataFrame, estados_fact=("F",), solo_facturable=True,
+                   estados_pend=("",)) -> dict:
+    """Construye el informe desde tablas ya estandarizadas; los criterios de los indicadores son configurables."""
+    f, h = f.copy(), h.copy()
 
     # Cruce por serial: comentario (y otros datos de la hora) sin duplicar filas de facturación
     hs = h[h["N° Serial"] != ""].drop_duplicates("N° Serial")
@@ -186,7 +204,8 @@ def build_report(fact_raw: pd.DataFrame, horas_raw: pd.DataFrame) -> dict:
     f["Estado"] = f["Estado"].str.upper()
     f["Facturable"] = f["Facturable"].str.upper()
     h["Estado"] = h["Estado"].str.upper()
-    facturable_ok = f["Facturable"].isin(["S", ""])
+    facturable_ok = f["Facturable"].isin(["S", ""]) if solo_facturable else pd.Series(True, index=f.index)
+    es_fact = f["Estado"].isin([e.upper() for e in estados_fact])
 
     names = dict(ESTADOS_BASE)
     names.update({e: n.title() for e, n in zip(h["Estado"], h["Nombre Estado"]) if e and n})
@@ -196,16 +215,16 @@ def build_report(fact_raw: pd.DataFrame, horas_raw: pd.DataFrame) -> dict:
 
     f["Realización %"] = np.where(f["Total Tarifa Estándar COP"] > 0, f["Total COP"] / f["Total Tarifa Estándar COP"], np.nan)
 
-    fac = f[(f["Estado"] == "F") & facturable_ok].copy()
+    fac = f[es_fact & facturable_ok].copy()
     fac["Mes"] = fac["Fecha de Factura"].dt.to_period("M").astype(str).replace("NaT", "")
 
-    pro = f[(f["Estado"] != "F") & facturable_ok].copy()
+    pro = f[~es_fact & facturable_ok].copy()
     pro["Proforma"] = pro["Estado"].map(etiqueta)
     pro["Mes"] = pro["Fec. Doc."].dt.to_period("M").astype(str).replace("NaT", "")
     hoy = pd.Timestamp(datetime.now().date())
     pro["Antigüedad (días)"] = (hoy - pro["Fec. Doc."]).dt.days
 
-    pen = h[h["Estado"] == ""].copy()
+    pen = h[h["Estado"].isin([e.upper() for e in estados_pend])].copy()
     pen["Valor Estimado COP"] = pen["Horas"].fillna(0) * pen["Tarifa Estándar"].fillna(0)
     pen["Antigüedad (días)"] = (hoy - pen["Fecha Movimiento TR"]).dt.days
     pen["Rango Antigüedad"] = pd.cut(
